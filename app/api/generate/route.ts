@@ -1,17 +1,16 @@
-import { NextResponse } from 'next/server';
-import OpenAI from 'openai';
+import { NextResponse } from "next/server";
+import OpenAI from "openai";
 
-export const runtime = 'edge';
+export const runtime = "nodejs"; // important for Buffer
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!
+  apiKey: process.env.OPENAI_API_KEY!,
 });
 
-// Empirical word model: ~150 WPM speaking speed
 const WPM = 150;
-
-function estimateWordCount(minutes: number) {
-  return Math.floor(minutes * WPM);
+function estimateWords(minutes: number) {
+  const m = Math.max(1, Math.min(60, Number(minutes) || 5));
+  return Math.round(m * WPM);
 }
 
 export async function POST(req: Request) {
@@ -22,93 +21,116 @@ export async function POST(req: Request) {
       topic,
       minutes,
       speakerA,
-      speakerB
+      speakerB,
     } = await req.json();
 
-    const words = estimateWordCount(minutes);
+    const targetWords = estimateWords(minutes);
 
-    let prompt = '';
+    let userPrompt: string;
 
-    if (mode === 'dialogue') {
-      prompt = `
+    if (mode === "dialogue") {
+      userPrompt = `
 Generate a DIALOGUE podcast script.
 
 Speaker A: ${speakerA}
 Speaker B: ${speakerB}
 Topic: ${topic}
-
-Length: about ${minutes} minutes (~${words} words).
+Length: about ${minutes} minutes (~${targetWords} words).
 
 Requirements:
 - Natural back-and-forth conversation
 - 2–4 sentence turns
 - Timecodes every 30–60 seconds like [00:45]
-- Use labels:
+- Use labels exactly:
   ${speakerA}: …
   ${speakerB}: …
-- Include a 1-sentence intro & outro
-- Must state: “This is an AI-generated simulation.”
+- Include a 1-sentence intro & 1-sentence outro
+- Make it clear this is an AI-generated simulation of the speakers.
 
-Return ONLY the script.
+Return ONLY the script text.
 `.trim();
     } else {
-      prompt = `
+      userPrompt = `
 Generate a SOLO podcast script.
 
-Voice role: ${name}
+Voice role / name: ${name}
 Topic: ${topic}
-Length: about ${minutes} minutes (~${words} words).
+Length: about ${minutes} minutes (~${targetWords} words).
 
 Include:
-- 1-line intro
-- Timecodes every 30–60 seconds
-- 1-line outro
-- This is an AI simulation.
+- A 1-sentence intro
+- Timecodes every 30–60 seconds like [00:45]
+- A 1-sentence outro
+- A short line that this is an AI simulation, not the real person.
 
-Return ONLY the script.
+Return ONLY the script text.
 `.trim();
     }
 
-    // Generate script text
+    // 1) Generate script with OpenAI
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1',
+      model: "gpt-4.1",
       messages: [
-        { role: 'system', content: 'You produce accurate, timed podcast scripts.' },
-        { role: 'user', content: prompt }
-      ]
+        {
+          role: "system",
+          content:
+            "You are a senior audio producer. Produce clean podcast scripts with timecodes.",
+        },
+        { role: "user", content: userPrompt },
+      ],
     });
 
-    const script = completion.choices[0].message?.content || '';
+    const script = completion.choices[0]?.message?.content ?? "";
 
-    // Convert script to speech using ElevenLabs
-const elevenResponse = await fetch(
-  "https://api.elevenlabs.io/v1/text-to-speech/YOUR_VOICE_ID",
-  {
-    method: "POST",
-    headers: {
-      "xi-api-key": process.env.ELEVEN_API_KEY!,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      text: script,
-      model_id: "eleven_multilingual_v2",
-      voice_settings: {
-        stability: 0.5,
-        similarity_boost: 0.8
+    // 2) Convert script to speech with ElevenLabs
+    const voiceId = process.env.ELEVEN_VOICE_ID; // set this in .env.local
+    if (!voiceId) {
+      console.warn("ELEVEN_VOICE_ID not set – returning script only.");
+      return NextResponse.json({ script, audioBase64: null });
+    }
+
+    const elevenRes = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": process.env.ELEVEN_API_KEY || "",
+          "Content-Type": "application/json",
+          Accept: "audio/mpeg",
+        },
+        body: JSON.stringify({
+          text: script,
+          model_id: "eleven_multilingual_v2",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.8,
+          },
+        }),
       }
-    })
-  }
-);
+    );
 
-const audioBuffer = Buffer.from(await elevenResponse.arrayBuffer());
-const audioBase64 = audioBuffer.toString("base64");
-const audioUrl = `data:audio/mp3;base64,${audioBase64}`;
+    if (!elevenRes.ok) {
+      const errText = await elevenRes.text();
+      console.error(
+        "ElevenLabs TTS error:",
+        elevenRes.status,
+        elevenRes.statusText,
+        errText
+      );
+      // Return script so UI still works; no audio
+      return NextResponse.json({
+        script,
+        audioBase64: null,
+        ttsError: "ElevenLabs TTS failed",
+      });
+    }
 
-    return NextResponse.json({
-      script,
-      audioUrl
-    });
+    const audioBuffer = Buffer.from(await elevenRes.arrayBuffer());
+    const audioBase64 = audioBuffer.toString("base64");
+
+    return NextResponse.json({ script, audioBase64 });
   } catch (err: any) {
-    return new NextResponse(err.message || 'Error', { status: 500 });
+    console.error("API /generate error:", err);
+    return new NextResponse(err?.message || "Server error", { status: 500 });
   }
 }
