@@ -80,16 +80,29 @@ Return ONLY the script.
 
     const script = completion.choices[0].message?.content || '';
 
-    // Convert script to speech
-    const audio = await openai.audio.speech.create({
-      model: 'gpt-4o-mini-tts',
-      voice: 'alloy',
-      input: script
-    });
+    // Convert script to speech using ElevenLabs
+const elevenResponse = await fetch(
+  "https://api.elevenlabs.io/v1/text-to-speech/YOUR_VOICE_ID",
+  {
+    method: "POST",
+    headers: {
+      "xi-api-key": process.env.ELEVEN_API_KEY!,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      text: script,
+      model_id: "eleven_multilingual_v2",
+      voice_settings: {
+        stability: 0.5,
+        similarity_boost: 0.8
+      }
+    })
+  }
+);
 
-    const buffer = Buffer.from(await audio.arrayBuffer());
-    const audioBase64 = buffer.toString('base64');
-    const audioUrl = `data:audio/mp3;base64,${audioBase64}`;
+const audioBuffer = Buffer.from(await elevenResponse.arrayBuffer());
+const audioBase64 = audioBuffer.toString("base64");
+const audioUrl = `data:audio/mp3;base64,${audioBase64}`;
 
     return NextResponse.json({
       script,
